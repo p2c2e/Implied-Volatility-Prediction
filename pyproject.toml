@@ -1,0 +1,17 @@
+[project]
+name = "Implied-Volatility-Prediction"
+version = "0.1.0"
+description = "A project for predicting implied volatility using machine learning models."
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+  "pandas>=1.0",
+  "numpy>=1.18",
+  "tensorflow>=2.0",
+  "scikit-learn>=0.24",
+  "matplotlib>=3.0",
+  "statsmodels>=0.12"
+]
+authors = [
+  { name = "Your Name", email = "your.email@example.com" }
+]
