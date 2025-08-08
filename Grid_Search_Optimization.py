@@ -7,14 +7,20 @@ Created on Fri Feb 16 21:53:29 2024
 
 import numpy as np
 import pandas as pd
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.wrappers.scikit_learn import KerasRegressor
+import os
+import warnings
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Suppress TF C++ logs (INFO/WARNING)
+import tensorflow as tf
+tf.get_logger().setLevel('ERROR')  # Reduce TensorFlow Python-side logs
+warnings.filterwarnings("ignore", message=".*tf.function retracing.*")  # Silence retracing warnings
+from keras.models import Sequential
+from keras.layers import Input, LSTM, Dense, Dropout
+from scikeras.wrappers import KerasRegressor
 from sklearn.model_selection import GridSearchCV
 from sklearn.metrics import mean_squared_error
 
 # Loading the dataset
-csv_file_path = 'main_columns_filtered.csv'
+csv_file_path = './CSVs used for Code/main_columns_filtered.csv'
 
 df = pd.read_csv(csv_file_path)
 df = df.drop(columns=['Exchange Date'])
@@ -39,7 +45,7 @@ for strike_price, dataset in datasets.items():
     
     # Scaling the features
     scaler = MinMaxScaler()
-    X_scaled = scaler.fit_transform(X)
+    X_scaled = scaler.fit_transform(X).astype(np.float32)
     scaled_datasets[strike_price] = (X_scaled, y)
 
 
@@ -58,8 +64,8 @@ for strike_price, (X_scaled, y) in scaled_datasets.items():
         y_prepared.append(y[i + look_back + look_forward - 1])
     
     # Reshaping the input to be [samples, time steps, features]
-    X_prepared = np.array(X_prepared).reshape(-1, look_back, X_scaled.shape[1])
-    y_prepared = np.array(y_prepared)
+    X_prepared = np.array(X_prepared, dtype=np.float32).reshape(-1, look_back, X_scaled.shape[1])
+    y_prepared = np.array(y_prepared, dtype=np.float32)
     
     prepared_datasets[strike_price] = (X_prepared, y_prepared)
 
@@ -76,8 +82,11 @@ y_train_5000, y_test_5000 = y_5000[:train_size], y_5000[train_size:]
 
 # Defining the LSTM model in a function to use with KerasRegressor
 def build_lstm_model(input_shape, lstm_units=64, dropout_rate=0.2):
+    # Use an explicit Input layer to avoid passing input_shape directly to RNN layers,
+    # which triggers the UserWarning from Keras.
     model = Sequential([
-        LSTM(units=lstm_units, return_sequences=True, input_shape=input_shape),
+        Input(shape=input_shape),
+        LSTM(units=lstm_units, return_sequences=True),
         Dropout(dropout_rate),
         LSTM(units=int(lstm_units/2)),
         Dense(int(lstm_units/4), activation='relu'),
@@ -86,19 +95,28 @@ def build_lstm_model(input_shape, lstm_units=64, dropout_rate=0.2):
     model.compile(optimizer='adam', loss='mean_squared_error')
     return model
 
-# Wrapping the model into KerasRegressor
-model_wrapper = KerasRegressor(build_fn=build_lstm_model, input_shape=(X_train_5000.shape[1], X_train_5000.shape[2]))
+# Wrapping the model into KerasRegressor (scikeras)
+# scikeras expects the model callable via the `model` argument and model build parameters
+# are passed with the `model__` prefix (used below in the grid). Also set verbose=0 for silent runs.
+model_wrapper = KerasRegressor(
+    model=build_lstm_model,
+    model__input_shape=(X_train_5000.shape[1], X_train_5000.shape[2]),
+    verbose=0,
+    fit__shuffle=False  # keep batch structure stable to reduce retracing
+)
 
 # Defining the grid search parameters
+# Note: model hyperparameters must be prefixed with 'model__' for scikeras so they are forwarded
+# into the model-building callable.
 param_grid = {
-    'lstm_units': [32, 64, 128],
-    'dropout_rate': [0.1, 0.2, 0.3],
+    'model__lstm_units': [32, 64, 128],
+    'model__dropout_rate': [0.1, 0.2, 0.3],
     'epochs': [50, 100],
     'batch_size': [16, 32]
 }
 
 # Creating GridSearchCV
-grid = GridSearchCV(estimator=model_wrapper, param_grid=param_grid, n_jobs=-1, cv=3, scoring='neg_mean_squared_error')
+grid = GridSearchCV(estimator=model_wrapper, param_grid=param_grid, n_jobs=1, cv=3, scoring='neg_mean_squared_error')
 
 # Fitting the grid search
 grid_result = grid.fit(X_train_5000, y_train_5000)
@@ -107,7 +125,8 @@ grid_result = grid.fit(X_train_5000, y_train_5000)
 print("Best: %f using %s" % (grid_result.best_score_, grid_result.best_params_))
 
 # Evaluating the best model on the test set
-best_model = grid_result.best_estimator_.model
+# scikeras stores the underlying Keras model in the `model_` attribute after fitting
+best_model = grid_result.best_estimator_.model_
 predictions = best_model.predict(X_test_5000)
 mse = mean_squared_error(y_test_5000, predictions)
 print(f"Test MSE: {mse}")
